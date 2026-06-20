@@ -27,6 +27,7 @@ const TW_LOCATIONS = [
 // ── 狀態 ──
 let currentLocation = TW_LOCATIONS[0];
 let CWA_API_KEY = localStorage.getItem('cwa_api_key') || '';
+let loadRequestId = 0;
 
 // ── API 設定 ──
 const CWA_BASE = 'https://opendata.cwa.gov.tw/api';
@@ -227,15 +228,21 @@ function wmoToDesc(code) {
 
 // ── 組合資料並渲染 ──
 async function loadWeather(loc) {
+  const myId = ++loadRequestId;
   showLoading(true);
 
   try {
     // Open-Meteo 永遠先抓（依真實 lat/lon，每個城市不同）
     const omData = await fetchOpenMeteo(loc);
 
+    // 如果這期間使用者又選了別的地區，拋棄此次結果
+    if (myId !== loadRequestId) return;
+
     // CWA 只在有 API Key 時嘗試，失敗不影響主流程
     const cwaCurrent  = CWA_API_KEY ? await fetchCWACurrent(loc).catch(() => null)   : null;
     const cwaForecast = CWA_API_KEY ? await fetchCWAForecast36(loc).catch(() => null) : null;
+
+    if (myId !== loadRequestId) return;
 
     // ── 即時天氣（CWA 優先，否則 Open-Meteo）──
     let current;
@@ -321,10 +328,11 @@ async function loadWeather(loc) {
 
   } catch (err) {
     console.error('載入天氣資料失敗', err);
-    // 顯示錯誤提示但仍用 loc 名稱
-    renderAll({ ...getMockData(loc), location: loc });
+    if (myId === loadRequestId) {
+      renderAll({ ...getMockData(loc), location: loc });
+    }
   } finally {
-    showLoading(false);
+    if (myId === loadRequestId) showLoading(false);
   }
 }
 
