@@ -193,10 +193,23 @@ async function fetchCWAForecast36(loc) {
 
 // ── 抓 Open-Meteo（免費，不需 API Key）──
 async function fetchOpenMeteo(loc) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,precipitation,weather_code,visibility&hourly=temperature_2m,precipitation_probability,precipitation,weather_code&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&timezone=Asia%2FTaipei&forecast_days=10`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`);
-  return res.json();
+  const params = new URLSearchParams({
+    latitude:  loc.lat,
+    longitude: loc.lon,
+    current:   'temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,precipitation,weather_code',
+    hourly:    'temperature_2m,precipitation_probability,precipitation,weather_code',
+    daily:     'temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code',
+    timezone:  'Asia/Taipei',
+    forecast_days: 10,
+  });
+  const res = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`, { cache: 'no-store' });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Open-Meteo ${res.status}: ${txt}`);
+  }
+  const json = await res.json();
+  if (!json.current) throw new Error('Open-Meteo: no current data');
+  return json;
 }
 
 // WMO 天氣代碼 → emoji
@@ -246,8 +259,10 @@ async function loadWeather(loc) {
 
     // ── 即時天氣（CWA 優先，否則 Open-Meteo）──
     let current;
+    let dataSource;
     if (cwaCurrent) {
       current = { ...cwaCurrent, location: `${loc.county} ${cwaCurrent.stationName}` };
+      dataSource = `CWA 觀測站：${cwaCurrent.stationName}`;
     } else {
       const c    = omData.current;
       const code = c.weather_code ?? omData.daily.weather_code?.[0] ?? 0;
@@ -259,11 +274,13 @@ async function loadWeather(loc) {
         humidity:   Math.round(c.relative_humidity_2m),
         rain:       Math.round((c.precipitation ?? 0) * 10) / 10,
         wind:       Math.round((c.wind_speed_10m ?? 0) / 3.6 * 10) / 10,
-        visibility: Math.round((c.visibility ?? 10000) / 1000),
+        visibility: 10,
         condition:  code === 0 ? 'sunny' : code >= 60 ? 'rain' : 'partly-cloudy',
         location:   loc.name,
       };
+      dataSource = 'Open-Meteo 氣象模型';
     }
+    console.log(`[天氣] ${loc.name} → ${current.temp}°C（來源：${dataSource}）`);
 
     // ── 逐小時（CWA 優先）──
     let hourly;
@@ -329,6 +346,9 @@ async function loadWeather(loc) {
   } catch (err) {
     console.error('載入天氣資料失敗', err);
     if (myId === loadRequestId) {
+      // 顯示錯誤來源在 AI 摘要區
+      document.getElementById('aiHeadline').textContent = `⚠️ 資料載入失敗`;
+      document.getElementById('aiSub').textContent = err.message || '未知錯誤，請開啟 F12 → Console 查看詳細訊息';
       renderAll({ ...getMockData(loc), location: loc });
     }
   } finally {
