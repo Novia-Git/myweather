@@ -107,35 +107,35 @@ function descToCondition(desc = '') {
 
 // ── 抓 CWA 即時觀測（O-A0003-001）──
 async function fetchCWACurrent(loc) {
-  // 抓最靠近該縣市的自動氣象站
   const url = cwaUrl('/v1/rest/datastore/O-A0003-001', {
-    StationAttribute: 'auto',
     CountyName: loc.county,
-    limit: 1,
+    limit: 3,
   });
   const res = await fetch(url);
+  if (!res.ok) throw new Error(`CWA HTTP ${res.status}`);
   const json = await res.json();
   const station = json?.records?.Station?.[0];
-  if (!station) throw new Error('no station');
+  if (!station) throw new Error('no station data');
 
-  const w = station.WeatherElement;
+  const w       = station.WeatherElement;
   const temp    = parseFloat(w.AirTemperature);
   const humidity= parseFloat(w.RelativeHumidity);
   const wind    = parseFloat(w.WindSpeed);
   const rain    = parseFloat(w.Now?.Precipitation ?? 0);
-  const vis     = parseFloat(w.VisibilityDescription ?? 10);
-  const desc    = w.Weather || '晴';
+  const desc    = w.Weather || '多雲時晴';
+
+  if (isNaN(temp)) throw new Error('invalid temp');
 
   return {
-    temp: Math.round(temp),
-    feels: Math.round(temp + (humidity > 70 ? 2 : 0)),
+    temp:       Math.round(temp),
+    feels:      Math.round(temp + (humidity > 70 ? 2 : 0)),
     desc,
-    emoji: descToEmoji(desc),
-    humidity: Math.round(humidity),
-    rain: isNaN(rain) ? 0 : rain,
-    wind: isNaN(wind) ? 0 : wind,
-    visibility: isNaN(vis) ? 10 : vis,
-    condition: descToCondition(desc),
+    emoji:      descToEmoji(desc),
+    humidity:   isNaN(humidity) ? 70 : Math.round(humidity),
+    rain:       isNaN(rain) ? 0 : rain,
+    wind:       isNaN(wind) ? 0 : wind,
+    visibility: 10,
+    condition:  descToCondition(desc),
     stationName: station.StationName,
   };
 }
@@ -192,8 +192,9 @@ async function fetchCWAForecast36(loc) {
 
 // ── 抓 Open-Meteo（免費，不需 API Key）──
 async function fetchOpenMeteo(loc) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation,visibility&hourly=temperature_2m,precipitation_probability,precipitation&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weathercode&timezone=Asia%2FTaipei&forecast_days=10`;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,precipitation,weather_code,visibility&hourly=temperature_2m,precipitation_probability,precipitation,weather_code&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&timezone=Asia%2FTaipei&forecast_days=10`;
   const res = await fetch(url);
+  if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`);
   return res.json();
 }
 
@@ -229,94 +230,98 @@ async function loadWeather(loc) {
   showLoading(true);
 
   try {
-    // Open-Meteo 不需 API Key，永遠嘗試
-    const omPromise = fetchOpenMeteo(loc);
+    // Open-Meteo 永遠先抓（依真實 lat/lon，每個城市不同）
+    const omData = await fetchOpenMeteo(loc);
 
-    // CWA 只在有 API Key 時嘗試
-    let cwaCurrentPromise  = CWA_API_KEY ? fetchCWACurrent(loc).catch(() => null)   : Promise.resolve(null);
-    let cwaForecastPromise = CWA_API_KEY ? fetchCWAForecast36(loc).catch(() => null) : Promise.resolve(null);
+    // CWA 只在有 API Key 時嘗試，失敗不影響主流程
+    const cwaCurrent  = CWA_API_KEY ? await fetchCWACurrent(loc).catch(() => null)   : null;
+    const cwaForecast = CWA_API_KEY ? await fetchCWAForecast36(loc).catch(() => null) : null;
 
-    const [omData, cwaCurrent, cwaForecast] = await Promise.all([omPromise, cwaCurrentPromise, cwaForecastPromise]);
-
-    // 組合即時天氣（CWA 優先，否則 Open-Meteo）
+    // ── 即時天氣（CWA 優先，否則 Open-Meteo）──
     let current;
     if (cwaCurrent) {
       current = { ...cwaCurrent, location: `${loc.county} ${cwaCurrent.stationName}` };
     } else {
-      const c = omData.current;
-      const code = omData.daily.weathercode[0];
+      const c    = omData.current;
+      const code = c.weather_code ?? omData.daily.weather_code?.[0] ?? 0;
       current = {
         temp:       Math.round(c.temperature_2m),
-        feels:      Math.round(c.temperature_2m + (c.relative_humidity_2m > 70 ? 2 : 0)),
+        feels:      Math.round(c.apparent_temperature ?? c.temperature_2m),
         desc:       wmoToDesc(code),
         emoji:      wmoToEmoji(code),
         humidity:   Math.round(c.relative_humidity_2m),
-        rain:       c.precipitation,
-        wind:       Math.round(c.wind_speed_10m / 3.6 * 10) / 10,
-        visibility: Math.round((c.visibility || 10000) / 1000),
+        rain:       Math.round((c.precipitation ?? 0) * 10) / 10,
+        wind:       Math.round((c.wind_speed_10m ?? 0) / 3.6 * 10) / 10,
+        visibility: Math.round((c.visibility ?? 10000) / 1000),
         condition:  code === 0 ? 'sunny' : code >= 60 ? 'rain' : 'partly-cloudy',
         location:   loc.name,
       };
     }
 
-    // 組合逐小時（CWA 優先）
+    // ── 逐小時（CWA 優先）──
     let hourly;
-    if (cwaForecast?.hourly) {
+    if (cwaForecast?.hourly?.length) {
       hourly = cwaForecast.hourly;
     } else {
-      const now = new Date();
-      const nowH = now.getHours();
-      hourly = omData.hourly.time.slice(0, 24).map((t, i) => {
-        const h = new Date(t).getHours();
-        const code = omData.hourly.weathercode?.[i] ?? 0;
-        return {
-          time: h === nowH && i < 2 ? '現在' : `${String(h).padStart(2,'0')}:00`,
-          emoji: wmoToEmoji(code),
-          temp:  Math.round(omData.hourly.temperature_2m[i]),
-          rain:  `${omData.hourly.precipitation_probability[i]}%`,
-        };
-      }).filter((_, i) => {
-        const h = new Date(omData.hourly.time[i]).getHours();
-        return h >= now.getHours() || i < 2;
-      }).slice(0, 12);
+      const nowH  = new Date().getHours();
+      const nowDate = new Date().toISOString().slice(0, 10);
+      hourly = omData.hourly.time
+        .map((t, i) => {
+          const dt   = new Date(t);
+          const h    = dt.getHours();
+          const date = t.slice(0, 10);
+          const code = omData.hourly.weather_code?.[i] ?? 0;
+          return {
+            _h: h, _date: date,
+            time:  `${String(h).padStart(2,'0')}:00`,
+            emoji: wmoToEmoji(code),
+            temp:  Math.round(omData.hourly.temperature_2m[i]),
+            rain:  `${omData.hourly.precipitation_probability?.[i] ?? 0}%`,
+          };
+        })
+        .filter(x => x._date === nowDate && x._h >= nowH)
+        .slice(0, 12)
+        .map((x, i) => ({ ...x, time: i === 0 ? '現在' : x.time }));
     }
 
-    // 組合10天預報（CWA 優先）
+    // ── 10天預報（CWA 優先）──
     let forecast;
-    if (cwaForecast?.forecast) {
+    if (cwaForecast?.forecast?.length) {
       forecast = cwaForecast.forecast;
     } else {
       const dayNames = ['日','一','二','三','四','五','六'];
       forecast = omData.daily.time.map((t, i) => {
-        const d = new Date(t);
-        const code = omData.daily.weathercode[i];
+        const d    = new Date(t + 'T00:00:00');
+        const code = omData.daily.weather_code?.[i] ?? 0;
         const label = i === 0 ? '今天' : i === 1 ? '明天' : `週${dayNames[d.getDay()]}`;
         return {
           day:   label,
           emoji: wmoToEmoji(code),
           high:  Math.round(omData.daily.temperature_2m_max[i]),
           low:   Math.round(omData.daily.temperature_2m_min[i]),
-          rain:  `${omData.daily.precipitation_probability_max[i]}%`,
+          rain:  `${omData.daily.precipitation_probability_max?.[i] ?? 0}%`,
         };
       });
     }
 
-    // 多資料源比較
+    // ── 多資料源比較 ──
     const omHigh = Math.round(omData.daily.temperature_2m_max[0]);
+    const omLow  = Math.round(omData.daily.temperature_2m_min[0]);
     const sources = [
-      { name: 'Open-Meteo', short: 'Open-Meteo', high: omHigh, low: Math.round(omData.daily.temperature_2m_min[0]), rain: `${omData.daily.precipitation_probability_max[0]}%` },
+      { name: 'Open-Meteo', short: 'Open-Meteo', high: omHigh, low: omLow, rain: `${omData.daily.precipitation_probability_max?.[0] ?? 0}%` },
     ];
     if (CWA_API_KEY && cwaForecast?.forecast?.[0]) {
       sources.unshift({ name: '中央氣象署', short: 'CWA', high: cwaForecast.forecast[0].high, low: cwaForecast.forecast[0].low, rain: cwaForecast.forecast[0].rain });
     }
 
-    // 2小時降雨（取 Open-Meteo 最近12個10分鐘，用逐小時插值）
-    const rain2h = omData.hourly.precipitation.slice(0, 12).map(v => Math.round(v * 10) / 10);
+    // ── 2小時降雨（Open-Meteo 逐小時插值）──
+    const rain2h = omData.hourly.precipitation.slice(0, 12).map(v => Math.round((v ?? 0) * 10) / 10);
 
     renderAll({ current, hourly, forecast, sources, rain2h, location: loc });
 
   } catch (err) {
     console.error('載入天氣資料失敗', err);
+    // 顯示錯誤提示但仍用 loc 名稱
     renderAll({ ...getMockData(loc), location: loc });
   } finally {
     showLoading(false);
