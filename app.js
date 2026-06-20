@@ -108,15 +108,16 @@ function descToCondition(desc = '') {
 
 // ── 抓 CWA 即時觀測（O-A0003-001）──
 async function fetchCWACurrent(loc) {
-  const url = cwaUrl('/v1/rest/datastore/O-A0003-001', {
-    CountyName: loc.county,
-    limit: 3,
-  });
-  const res = await fetch(url);
+  // 抓多筆，然後在 client 端過濾符合縣市的站
+  const url = cwaUrl('/v1/rest/datastore/O-A0003-001', { limit: 100 });
+  const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error(`CWA HTTP ${res.status}`);
   const json = await res.json();
-  const station = json?.records?.Station?.[0];
-  if (!station) throw new Error('no station data');
+  const all = json?.records?.Station ?? [];
+  // 找屬於該縣市的站，優先取有效溫度的
+  const inCounty = all.filter(s => s.GeoInfo?.CountyName === loc.county);
+  const station = inCounty.find(s => !isNaN(parseFloat(s.WeatherElement?.AirTemperature))) ?? inCounty[0];
+  if (!station) throw new Error(`no station in ${loc.county}`);
 
   const w       = station.WeatherElement;
   const temp    = parseFloat(w.AirTemperature);
