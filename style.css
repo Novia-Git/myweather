@@ -52,6 +52,9 @@ body {
 .nav-icon { font-size: 20px; }
 
 .nav-location {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -63,6 +66,7 @@ body {
   background: var(--color-glass);
   border: 1px solid var(--color-card-border);
   transition: background 0.2s;
+  white-space: nowrap;
 }
 
 .nav-location:hover { background: rgba(255,255,255,0.12); }
